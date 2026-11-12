@@ -6,7 +6,8 @@ from tkinter import filedialog, messagebox, ttk
 import midi2sng as m
 
 VOICES = ["Off", "Voice 1", "Voice 2", "Voice 3"]
-INSTRS = [m.INSTRUMENT_NAMES[i] for i in sorted(m.INSTRUMENT_NAMES)]
+MIDI_PROGRAM = "MIDI program"
+INSTRS = [MIDI_PROGRAM] + [m.INSTRUMENT_NAMES[i] for i in sorted(m.INSTRUMENT_NAMES)]
 CONFIG = os.path.join(os.path.expanduser("~"), ".midi2sng_gt2reloc")
 
 
@@ -108,7 +109,7 @@ class App(tk.Tk):
         for s, v, ins, mode in self.rows:
             a = chosen.get(id(s))
             v.set(VOICES[a.voice + 1] if a else "Off")
-            ins.set(m.INSTRUMENT_NAMES[a.instrument if a else m.program_to_instrument(s.program)])
+            ins.set(m.INSTRUMENT_NAMES[m.INS_KICK] if s.is_drums else MIDI_PROGRAM)
             mode.set(a.mode if a else "highest")
 
     def browse_reloc(self):
@@ -123,7 +124,8 @@ class App(tk.Tk):
         out = []
         for s, v, ins, mode in self.rows:
             if v.get() in VOICES[1 : self.nvoices.get() + 1]:
-                out.append(m.Assignment(s, VOICES.index(v.get()) - 1, by_name[ins.get()], mode.get()))
+                instrument = None if ins.get() == MIDI_PROGRAM else by_name[ins.get()]
+                out.append(m.Assignment(s, VOICES.index(v.get()) - 1, instrument, mode.get()))
         return out
 
     def save(self, sid):

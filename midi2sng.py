@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import struct
 import subprocess
+from bisect import bisect_right
 from dataclasses import dataclass, field
 
 import mido
@@ -44,6 +45,7 @@ class Note:
     end: int
     pitch: int
     velocity: int = 100
+    program: int | None = None  # MIDI program at note-on; None uses the source's program
 
 
 @dataclass
@@ -81,7 +83,7 @@ class MidiInfo:
 class Assignment:
     source: Source
     voice: int  # 0..2
-    instrument: int
+    instrument: int | None  # None follows each note's MIDI program
     mode: str = "highest"  # or "lowest"; ignored for drums
 
 
@@ -102,38 +104,52 @@ def load_midi(path: str) -> MidiInfo:
     bpm = 0.0
     sources: dict[tuple[int, int], Source] = {}
     length = 0
+    program_events: dict[tuple[int, int], list[tuple[int, int, int, int]]] = {}
+    for ti, track in enumerate(mid.tracks):
+        tick = 0
+        for event_index, msg in enumerate(track):
+            tick += msg.time
+            if msg.type == "program_change":
+                scope = ti if mid.type == 2 else 0
+                program_events.setdefault((scope, msg.channel), []).append(
+                    (tick, ti, event_index, msg.program)
+                )
+    for events in program_events.values():
+        events.sort()
+
     for ti, track in enumerate(mid.tracks):
         tick = 0
         name = ""
-        programs: dict[int, int] = {}
-        active: dict[tuple[int, int], list[tuple[int, int]]] = {}
-        for msg in track:
+        active: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
+        for event_index, msg in enumerate(track):
             tick += msg.time
             if msg.type == "set_tempo" and not bpm:
                 bpm = mido.tempo2bpm(msg.tempo)
             elif msg.type == "track_name":
                 name = msg.name
-            elif msg.type == "program_change":
-                programs[msg.channel] = msg.program
-                if (ti, msg.channel) in sources:
-                    sources[(ti, msg.channel)].program = msg.program
             elif msg.type == "note_on" and msg.velocity > 0:
-                active.setdefault((msg.channel, msg.note), []).append((tick, msg.velocity))
+                scope = ti if mid.type == 2 else 0
+                events = program_events.get((scope, msg.channel), [])
+                index = bisect_right(events, (tick, ti, event_index, 127))
+                program = events[index - 1][3] if index else 0
+                active.setdefault((msg.channel, msg.note), []).append((tick, msg.velocity, program))
             elif msg.type in ("note_off", "note_on"):
                 stack = active.get((msg.channel, msg.note))
                 if stack:
-                    start, vel = stack.pop(0)
+                    start, vel, program = stack.pop(0)
                     src = sources.setdefault(
                         (ti, msg.channel),
-                        Source(ti, msg.channel, name, programs.get(msg.channel, 0)),
+                        Source(ti, msg.channel, name, program),
                     )
                     if not src.name:
                         src.name = name
-                    src.notes.append(Note(start, max(tick, start + 1), msg.note, vel))
+                    src.notes.append(Note(start, max(tick, start + 1), msg.note, vel, program))
                     length = max(length, tick)
     result = [s for s in sources.values() if s.notes]
     for s in result:
         s.notes.sort(key=lambda n: (n.start, n.pitch))
+        if s.notes[0].program is not None:
+            s.program = s.notes[0].program
     return MidiInfo(tpb, bpm or 120.0, result, length)
 
 
@@ -190,11 +206,8 @@ def auto_assign(info: MidiInfo, max_voices: int = 3) -> list[Assignment]:
         if s.is_drums:
             result.append(Assignment(s, voice, INS_KICK))
         else:
-            ins = program_to_instrument(s.program)
-            if s.avg_pitch < 50 and ins in (INS_SAW, INS_TRI, INS_PLUCK):
-                ins = INS_BASS
             mode = "lowest" if s.avg_pitch < 50 else "highest"
-            result.append(Assignment(s, voice, ins, mode))
+            result.append(Assignment(s, voice, None, mode))
     return result
 
 
@@ -215,7 +228,8 @@ def _mono_line(a: Assignment, row_ticks: float, transpose: int):
             note = FIRSTNOTE + 36
             e = s + 1
         else:
-            ins = a.instrument
+            program = n.program if n.program is not None else a.source.program
+            ins = a.instrument if a.instrument is not None else program_to_instrument(program)
             pitch = n.pitch + transpose
             while pitch < MIDI_C0:
                 pitch += 12
